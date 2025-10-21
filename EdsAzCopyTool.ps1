@@ -1,5 +1,32 @@
+Clear-Host
+Write-Host @"
+    __________    _____         
+   / ____/ __ \ '/ ___/         
+  / __/ / / / /  \__ \          
+ / /___/ /_/ /  ___/ /          
+/_____/_____/  /____/           
+                                
+    Azure Copy Tool
+"@ -ForegroundColor Cyan
+
+Write-Host "`nWelcome! Initialising..." -ForegroundColor Yellow
+Write-Host "Please wait while modules load...`n" -ForegroundColor Gray
+
+# Ensure Az.Storage module is available
+#if (-not (Get-Module -ListAvailable -Name Az.Storage)) {
+#    Write-Host "Installing Az.Storage module..." -ForegroundColor Yellow
+#    Install-Module Az.Storage -Scope CurrentUser -Force
+#}
+Import-Module Az.Storage
+
+# Global flag for graceful stop
+$global:stopRequested = $false
+
+# Register Ctrl+Break handler for graceful stop
+[console]::TreatControlCAsInput = $true
+
 # AzCopy configuration
-$azcopyPath = ".\azcopy.exe"  # Update if azcopy.exe is in a different location
+$azcopyPath = ".\azcopy.exe"
 
 # Read keys from files
 $sourceKeyFile = ".\KeyOfSrc.log"
@@ -17,57 +44,109 @@ if (-not (Test-Path $destKeyFile)) {
     exit
 }
 
+if (-not (Test-Path $azcopyPath)) {
+    Write-Host "Error: azcopy.exe not found at $azcopyPath" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit
+}
+
 $sourceKey = (Get-Content $sourceKeyFile -Raw).Trim()
 $destKey = (Get-Content $destKeyFile -Raw).Trim()
 
-# Get storage account details from user
+
+# Optional pre-set values (leave empty to prompt)
+$preSourceAccount = ""
+$preSourceShare   = ""
+$preDestAccount   = ""
+$preDestShare     = ""
+
 Write-Host "`n=== Azure Storage Configuration ===" -ForegroundColor Yellow
 Write-Host ""
 
-$sourceAccount = Read-Host "Source storage account name"
-$sourceShare = Read-Host "Source share name (main folder)"
-Write-Host ""
-$destAccount = Read-Host "Destination storage account name"
-$sameShare = Read-Host "Is the destination share name the same as source? (Y/N)"
-
-if ($sameShare -eq 'Y' -or $sameShare -eq 'y') {
-    $destShare = $sourceShare
+# Source
+if ([string]::IsNullOrWhiteSpace($preSourceAccount)) {
+    $sourceAccount = Read-Host "Source storage account name"
 } else {
-    $destShare = Read-Host "Destination share name (main folder)"
+    $sourceAccount = $preSourceAccount
 }
 
-# Verify shares exist
-Write-Host "`nVerifying storage shares..." -ForegroundColor Cyan
-
-$sourceShareUrl = "https://$sourceAccount.file.core.windows.net/$sourceShare"
-$destShareUrl = "https://$destAccount.file.core.windows.net/$destShare"
-
-# Set source account credentials
-$env:AZCOPY_ACCOUNT_NAME = $sourceAccount
-$env:AZCOPY_ACCOUNT_KEY = $sourceKey
-
-$sourceCheck = & $azcopyPath list $sourceShareUrl --output-type=text 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Cannot access source share '$sourceAccount/$sourceShare'" -ForegroundColor Red
-    Write-Host "Check that the account name, share name, and key are correct." -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit
+if ([string]::IsNullOrWhiteSpace($preSourceShare)) {
+    $sourceShare = Read-Host "Source share name (main folder)"
+} else {
+    $sourceShare = $preSourceShare
 }
 
-# Set destination account credentials
-$env:AZCOPY_ACCOUNT_NAME = $destAccount
-$env:AZCOPY_ACCOUNT_KEY = $destKey
+Write-Host ""
 
-$destCheck = & $azcopyPath list $destShareUrl --output-type=text 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Cannot access destination share '$destAccount/$destShare'" -ForegroundColor Red
-    Write-Host "Check that the account name, share name, and key are correct." -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit
+# Destination
+if ([string]::IsNullOrWhiteSpace($preDestAccount)) {
+    $destAccount = Read-Host "Destination storage account name"
+} else {
+    $destAccount = $preDestAccount
+}
+
+if ([string]::IsNullOrWhiteSpace($preDestShare)) {
+    $sameShare = Read-Host "Is the destination share name the same as source? (Y/N)"
+    if ($sameShare -eq 'Y' -or $sameShare -eq 'y') {
+        $destShare = $sourceShare
+    } else {
+        $destShare = Read-Host "Destination share name"
+    }
+} else {
+    $destShare = $preDestShare
 }
 
 
-Write-Host "Both shares verified successfully." -ForegroundColor Green
+# Generate SAS tokens using Az.Storage (12 hour expiry)
+Write-Host "`nGenerating SAS tokens..." -ForegroundColor Cyan
+
+$sourceCtx = New-AzStorageContext -StorageAccountName $sourceAccount -StorageAccountKey $sourceKey
+$destCtx = New-AzStorageContext -StorageAccountName $destAccount -StorageAccountKey $destKey
+
+$sourceSasToken = New-AzStorageShareSASToken -Name $sourceShare -Context $sourceCtx -Permission "rl" -ExpiryTime (Get-Date).AddHours(12)
+$destSasToken = New-AzStorageShareSASToken -Name $destShare -Context $destCtx -Permission "rwdlc" -ExpiryTime (Get-Date).AddHours(12)
+
+# Build share URLs
+$sourceShareUrl = "https://$sourceAccount.file.core.windows.net/$sourceShare?$sourceSasToken"
+$destShareUrl = "https://$destAccount.file.core.windows.net/$destShare?$destSasToken"
+
+#Write-Host "Debug - Source SAS: $sourceSasToken" -ForegroundColor Gray
+#Write-Host "Debug - Source URL: $sourceShareUrl" -ForegroundColor Gray
+#Write-Host "Debug - Dest SAS: $destSasToken" -ForegroundColor Gray
+#Write-Host "Debug - Dest URL: $destShareUrl" -ForegroundColor Gray
+#
+## Verify shares exist
+#Write-Host "`nVerifying storage shares..." -ForegroundColor Cyan
+#
+#Write-Host "Debug - sourceAccount: $sourceAccount" -ForegroundColor Gray
+#Write-Host "Debug - sourceShare: $sourceShare" -ForegroundColor Gray
+#Write-Host "Debug - sourceSasToken length: $($sourceSasToken.Length)" -ForegroundColor Gray
+#Write-Host "Debug - destAccount: $destAccount" -ForegroundColor Gray
+#Write-Host "Debug - destShare: $destShare" -ForegroundColor Gray
+#Write-Host "Debug - destSasToken length: $($destSasToken.Length)" -ForegroundColor Gray
+
+
+##$sourceCheck = & $azcopyPath list "https://dccproject.file.core.windows.net/projects2?sv=2025-07-05&spr=https&st=2025-10-20T15%3A19%3A52Z&se=2025-10-21T15%3A19%3A52Z&sr=s&sp=rwl&sig=H%2FRZGTmvrTE0a%2BSogRTBsWwce7cybyTeQTOutYLyfds%3D" --output-type=text 2>&1 | Out-String
+#$sourceCheck = & $azcopyPath list --output-type=text 2>&1 | Out-String
+#
+#if ($LASTEXITCODE -ne 0) {
+#    Write-Host "Error: Cannot access source share '$sourceAccount/$sourceShare'" -ForegroundColor Red
+#    Write-Host "Check that the account name, share name, and key are correct." -ForegroundColor Red
+#    Write-Host "`nAzCopy output:" -ForegroundColor Red
+#    Write-Host $sourceCheck -ForegroundColor Red
+#    Read-Host "Press Enter to exit"
+#    exit
+#}
+#
+#$destCheck = & $azcopyPath list $destShareUrl --output-type=text | Select-Object -First 1
+#if ($LASTEXITCODE -ne 0) {
+#    Write-Host "Error: Cannot access destination share '$destAccount/$destShare'" -ForegroundColor Red
+#    Write-Host "Check that the account name, share name, and key are correct." -ForegroundColor Red
+#    Read-Host "Press Enter to exit"
+#    exit
+#}
+#
+#Write-Host "Both shares verified successfully." -ForegroundColor Green
 
 # Confirm source and destination roles
 Write-Host "`n=== IMPORTANT: Confirm Copy Direction ===" -ForegroundColor Yellow
@@ -91,23 +170,16 @@ if ($confirmDirection -ne 'Y' -and $confirmDirection -ne 'y') {
 $logFile = ".\AzCopyLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 # Read item paths from text file
-$pathsFile = ".\ItemPaths.txt"
+$pathsFile = ".\ItemPaths.log"
 if (-not (Test-Path $pathsFile)) {
-    Write-Host "Error: ItemPaths.txt not found in current directory" -ForegroundColor Red
+    Write-Host "Error: ItemPaths.log not found in current directory" -ForegroundColor Red
     Read-Host "Press Enter to exit"
     exit
 }
 
-if (-not (Test-Path $azcopyPath)) {
-    Write-Host "Error: azcopy.exe not found at $azcopyPath" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit
-}
-
-$itemPaths = Get-Content $pathsFile | Where-Object { $_.Trim() -ne "" } | ForEach-Object { $_.Trim().TrimStart(".\", "/", "\") }
-
+$itemPaths = Get-Content $pathsFile | Where-Object { $_.Trim() -ne "" } | ForEach-Object { $_.Trim().TrimStart('.', '\', '/') }
 if ($itemPaths.Count -eq 0) {
-    Write-Host "Error: ItemPaths.txt is empty" -ForegroundColor Red
+    Write-Host "Error: ItemPaths.log is empty" -ForegroundColor Red
     Write-Host ""
     Write-Host "Example usage - add paths like these (one per line):" -ForegroundColor Yellow
     Write-Host "  Projects/123456" -ForegroundColor Gray
@@ -137,44 +209,41 @@ if ($total -gt 10) {
     $itemPaths | Select-Object -Last 5 | ForEach-Object { Write-Host "  $_" }
 }
 
-Write-Host ""
-$checkExistence = Read-Host "Check if all items exist before starting? (Y/N)"
-
-$notFound = @()
-if ($checkExistence -eq 'Y' -or $checkExistence -eq 'y') {
-    Write-Host "`nChecking source items..." -ForegroundColor Cyan
-    
-    foreach ($itemPath in $itemPaths) {
-        $sourceUrl = "https://$sourceAccount.file.core.windows.net/$sourceShare/$itemPath`?$sourceKey"
-        
-        # Use AzCopy list to check existence (checking parent directory)
-        $checkPath = Split-Path $itemPath -Parent
-        if ([string]::IsNullOrEmpty($checkPath)) { $checkPath = "" }
-        
-        $checkUrl = "https://$sourceAccount.file.core.windows.net/$sourceShare/$checkPath`?$sourceKey"
-        $itemName = Split-Path $itemPath -Leaf
-        
-        $output = & $azcopyPath list $checkUrl --output-type=text 2>&1 | Out-String
-        
-        if ($output -notmatch [regex]::Escape($itemName)) {
-            $notFound += $itemPath
-        }
-    }
-    
-    if ($notFound.Count -gt 0) {
-        Write-Host "`n$($notFound.Count) item(s) not found in source:" -ForegroundColor Red
-        $notFound | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-        Write-Host ""
-        $proceedAnyway = Read-Host "Proceed anyway? (Y/N)"
-        if ($proceedAnyway -ne 'Y' -and $proceedAnyway -ne 'y') {
-            Write-Host "Copy cancelled." -ForegroundColor Yellow
-            Read-Host "Press Enter to exit"
-            exit
-        }
-    } else {
-        Write-Host "All items found in source." -ForegroundColor Green
-    }
-}
+#Write-Host ""
+#$checkExistence = Read-Host "Check if all items exist before starting? (Y/N)"
+#
+#$notFound = @()
+#if ($checkExistence -eq 'Y' -or $checkExistence -eq 'y') {
+#    Write-Host "`nChecking source items..." -ForegroundColor Cyan
+#    
+#    foreach ($itemPath in $itemPaths) {
+#        $checkPath = Split-Path $itemPath -Parent
+#        if ([string]::IsNullOrEmpty($checkPath)) { $checkPath = "" }
+#        
+#        $checkUrl = "https://$sourceAccount.file.core.windows.net/$sourceShare/$checkPath?$sourceSasToken"
+#        $itemName = Split-Path $itemPath -Leaf
+#        
+#        $output = & $azcopyPath list $checkUrl --output-type=text 2>&1 | Out-String
+#        
+#        if ($output -notmatch [regex]::Escape($itemName)) {
+#            $notFound += $itemPath
+#        }
+#    }
+#    
+#    if ($notFound.Count -gt 0) {
+#        Write-Host "`n$($notFound.Count) item(s) not found in source:" -ForegroundColor Red
+#        $notFound | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+#        Write-Host ""
+#        $proceedAnyway = Read-Host "Proceed anyway? (Y/N)"
+#        if ($proceedAnyway -ne 'Y' -and $proceedAnyway -ne 'y') {
+#            Write-Host "Copy cancelled." -ForegroundColor Yellow
+#            Read-Host "Press Enter to exit"
+#            exit
+#        }
+#    } else {
+#        Write-Host "All items found in source." -ForegroundColor Green
+#    }
+#}
 
 Write-Host ""
 $confirmation = Read-Host "Proceed with copy? (Y/N)"
@@ -183,6 +252,10 @@ if ($confirmation -ne 'Y' -and $confirmation -ne 'y') {
     Read-Host "Press Enter to exit"
     exit
 }
+
+Write-Host ""
+$overwriteMode = Read-Host "If file already exists - Overwrite (O) or Skip (S)?"
+$skipExisting = ($overwriteMode -eq 'S' -or $overwriteMode -eq 's')
 
 # Start logging
 "AzCopy started: $(Get-Date)" | Out-File -FilePath $logFile
@@ -200,35 +273,97 @@ $succeeded = 0
 $failed = 0
 
 foreach ($itemPath in $itemPaths) {
-    $current++
-    
-    # Determine if it's a file or folder based on extension
-    $isFile = [System.IO.Path]::HasExtension($itemPath)
-    
-    # Build source and destination URLs with account keys as connection strings
-    $sourceUrl = "https://$sourceAccount.file.core.windows.net/$sourceShare/$itemPath"
-    $destUrl = "https://$destAccount.file.core.windows.net/$destShare/$itemPath"
-    
-    Write-Host "[$current/$total] Copying: $itemPath" -ForegroundColor Cyan
-    
-    # Run AzCopy with source and destination keys
-    # Use --source-account-key and destination will use env variable
-    $env:AZCOPY_ACCOUNT_KEY = $destKey
-    
-    if ($isFile) {
-        $output = & $azcopyPath copy $sourceUrl $destUrl --source-account-key=$sourceKey --output-type=text 2>&1
-    } else {
-        $output = & $azcopyPath copy $sourceUrl $destUrl --source-account-key=$sourceKey --recursive --output-type=text 2>&1
+    # Check for graceful stop request
+    if ([console]::KeyAvailable) {
+        $key = [console]::ReadKey($true)
+        if ($key.Key -eq 'Pause' -or ($key.Modifiers -eq 'Control' -and $key.Key -eq 'C')) {
+            Write-Host "`n*** Graceful stop requested. Finishing current item... ***" -ForegroundColor Yellow
+            $global:stopRequested = $true
+        }
     }
     
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  Success" -ForegroundColor Green
-        "SUCCESS: $itemPath" | Out-File -FilePath $logFile -Append
-        $succeeded++
+    if ($global:stopRequested) {
+        Write-Host "Stopping after last completed item." -ForegroundColor Yellow
+        break
+    }
+    
+    $current++    
+    $attempt = 0
+    $maxAttempts = 2
+    $completed = $false
+
+    # Determine if it's a file or folder
+    $isFile = [System.IO.Path]::HasExtension($itemPath)
+
+    # Build source and destination URLs with SAS tokens
+    if ($isFile) {
+        $sourceUrl = "https://${sourceAccount}.file.core.windows.net/${sourceShare}/${itemPath}?${sourceSasToken}"
     } else {
-        Write-Host "  Failed" -ForegroundColor Red
-        "FAILED: $itemPath" | Out-File -FilePath $logFile -Append
-        $output | Out-File -FilePath $logFile -Append
+        $sourceUrl = "https://${sourceAccount}.file.core.windows.net/${sourceShare}/${itemPath}/*?${sourceSasToken}"
+    }
+    $destUrl = "https://${destAccount}.file.core.windows.net/${destShare}/${itemPath}?${destSasToken}"
+
+    Write-Host "[$current/$total] Copying: $itemPath" -ForegroundColor Cyan
+
+    # Log the URLs being used (for debugging)
+    #Write-Host "item path: $itemPath"
+    #Write-Host "sourceURL: $sourceUrl"
+    #Write-Host "destURL: $destUrl"
+
+    #"SOURCE URL: $sourceUrl" | Out-File -FilePath $logFile -Append
+    #"DEST URL:   $destUrl"   | Out-File -FilePath $logFile -Append
+
+    while (-not $completed -and $attempt -lt $maxAttempts) {
+        $attempt++
+
+        if ($isFile) {
+            if ($skipExisting) {
+                $output = & $azcopyPath copy $sourceUrl $destUrl --overwrite=false --output-type=text 2>&1
+            } else {
+                $output = & $azcopyPath copy $sourceUrl $destUrl --overwrite=true --output-type=text 2>&1
+            }
+        } else {
+            if ($skipExisting) {
+                $output = & $azcopyPath copy $sourceUrl $destUrl --recursive --overwrite=false --output-type=text 2>&1
+            } else {
+                $output = & $azcopyPath copy $sourceUrl $destUrl --recursive --overwrite=true --output-type=text 2>&1
+            }
+        }
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Success" -ForegroundColor Green
+            "SUCCESS: $itemPath" | Out-File -FilePath $logFile -Append
+            $succeeded++
+            $completed = $true
+        } else {
+            Write-Host "  Attempt $attempt failed" -ForegroundColor Red
+            $output | Out-File -FilePath $logFile -Append
+            if ($attempt -ge $maxAttempts) {
+                Write-Host "  Max attempts reached for $itemPath" -ForegroundColor Red
+                do {
+                    $choice = Read-Host "Choose: Retry (R), Skip (S), End (E)"
+                } while ($choice -notin @('R','r','S','s','E','e'))
+
+                switch ($choice.ToUpper()) {
+                    'R' { $attempt = 0 } # reset attempts to retry
+                    'S' { $failed++; $completed = $true } # skip to next
+                    'E' { 
+                        Write-Host "`n=== Copy Aborted by User ===" -ForegroundColor Yellow
+                        "" | Out-File -FilePath $logFile -Append
+                        "Az aborted: $(Get-Date)" | Out-File -FilePath $logFile -Append
+                        "Total: $total | Succeeded: $succeeded | Failed: $failed" | Out-File -FilePath $logFile -Append
+                        return
+                    }
+                }
+            } else {
+                Start-Sleep -Seconds 2 # small delay before retry
+            }
+        }
+    }
+
+    if (-not $completed -and $attempt -ge $maxAttempts) {
+        Write-Host "  Failed after $maxAttempts attempts" -ForegroundColor Red
+        "FAILED: $itemPath after $maxAttempts attempts" | Out-File -FilePath $logFile -Append
         $failed++
     }
 }
