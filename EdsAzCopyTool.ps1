@@ -50,9 +50,41 @@ if (-not (Test-Path $azcopyPath)) {
     exit
 }
 
-$sourceKey = (Get-Content $sourceKeyFile -Raw).Trim()
-$destKey = (Get-Content $destKeyFile -Raw).Trim()
+# Read keys from files if they exist
+$sourceKey = $null
+$destKey = $null
 
+if (Test-Path $sourceKeyFile) {
+    $sourceKey = (Get-Content $sourceKeyFile -Raw -ErrorAction SilentlyContinue)
+    if ($sourceKey) { $sourceKey = $sourceKey.Trim() }
+}
+
+if (Test-Path $destKeyFile) {
+    $destKey = (Get-Content $destKeyFile -Raw -ErrorAction SilentlyContinue)
+    if ($destKey) { $destKey = $destKey.Trim() }
+}
+
+if ([string]::IsNullOrWhiteSpace($sourceKey)) {
+    Write-Host "`nKeyOfSrc.log is empty or not found." -ForegroundColor Yellow
+    Write-Host "You can paste your source storage account key here, or add it to KeyOfSrc.log to avoid re-entering each time." -ForegroundColor Gray
+    $sourceKey = Read-Host "Enter source storage account key"
+    if ([string]::IsNullOrWhiteSpace($sourceKey)) {
+        Write-Host "Source key is required. Exiting." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($destKey)) {
+    Write-Host "`nKeyOfDest.log is empty or not found." -ForegroundColor Yellow
+    Write-Host "You can paste your destination storage account key here, or add it to KeyOfDest.log to avoid re-entering each time." -ForegroundColor Gray
+    $destKey = Read-Host "Enter destination storage account key"
+    if ([string]::IsNullOrWhiteSpace($destKey)) {
+        Write-Host "Destination key is required. Exiting." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit
+    }
+}
 
 # Optional pre-set values (leave empty to prompt)
 $preSourceAccount = ""
